@@ -193,48 +193,7 @@ class BitrixAPI:
             raise Exception(f"Contato com ID {contact_id} não encontrado")
             
         return result["result"]
-    
-    def find_contact_by_email(self, email: str) -> List[Dict]:
-        """
-        Encontra contatos pelo endereço de email.
-        
-        Args:
-            email (str): Endereço de email para busca.
-                Para busca exata, passe o email completo.
-                Para busca por substring, use find_contact_by_email_substring.
-            
-        Returns:
-            List[Dict]: Lista de contatos que possuem o email especificado.
-        """
-        params = {
-            "filter": {"EMAIL": email},
-        }
-        
-        result = self._make_request("crm.contact.list", params)
-        return result.get("result", [])
-    
-    def find_contact_by_email_substring(self, email_substring: str) -> List[Dict]:
-        """
-        Encontra contatos que contenham um determinado texto no email.
-        
-        Args:
-            email_substring (str): Parte do email para busca.
-            
-        Returns:
-            List[Dict]: Lista de contatos que possuem o substring no email.
-            
-        Note:
-            Para campos múltiplos como EMAIL, a busca LIKE só funciona com
-            correspondências exatas. Este método é uma implementação específica
-            que pode ter limitações conforme a documentação da API.
-        """
-        params = {
-            "filter": {"%EMAIL": email_substring},
-        }
-        
-        result = self._make_request("crm.contact.list", params)
-        return result.get("result", [])
-    
+
     def find_contact_by_phone(self, phone: str) -> List[Dict]:
         """
         Encontra contatos pelo número de telefone.

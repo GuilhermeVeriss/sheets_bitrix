@@ -4,12 +4,12 @@
 """
 Módulo para interação com a API Google Sheets.
 Este módulo fornece uma interface para operações de leitura de dados
-de planilhas do Google Sheets.
+de planilhas do Google Sheets usando variáveis de ambiente.
 """
 
 import json
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -20,7 +20,7 @@ class GoogleSheetsAPI:
     Classe para interagir com a API Google Sheets (somente leitura).
     
     Esta classe fornece métodos para ler dados de planilhas do Google Sheets
-    usando uma conta de serviço (service account) para autenticação.
+    usando uma conta de serviço (service account) para autenticação via variáveis de ambiente.
     
     Attributes:
         service: Objeto de serviço para interagir com a API Google Sheets.
@@ -30,18 +30,67 @@ class GoogleSheetsAPI:
     # Escopo necessário para leitura de planilhas
     SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
     
-    def __init__(self, credentials_path: str):
+    def __init__(self, credentials_source: Optional[str] = None):
         """
         Inicializa a instância da classe GoogleSheetsAPI.
         
         Args:
-            credentials_path (str): Caminho para o arquivo JSON de credenciais
-                da conta de serviço do Google Cloud.
+            credentials_source (Optional[str]): Pode ser:
+                - None: Usa variável de ambiente GOOGLE_CREDENTIALS_JSON (recomendado)
+                - String JSON: Credenciais diretas em formato JSON
+                - Caminho de arquivo: Para compatibilidade (deprecated)
                 
         Raises:
-            FileNotFoundError: Se o arquivo de credenciais não for encontrado.
-            ValueError: Se as credenciais forem inválidas.
+            ValueError: Se as credenciais não forem encontradas ou forem inválidas.
         """
+        if credentials_source is None:
+            # Modo padrão: usar variável de ambiente
+            self._init_from_env_var()
+        elif credentials_source.strip().startswith('{'):
+            # String JSON direta
+            self._init_from_json_string(credentials_source)
+        elif os.path.isfile(credentials_source):
+            # Arquivo JSON (deprecated mas mantido para compatibilidade)
+            self._init_from_file(credentials_source)
+        else:
+            # Assumir que é uma variável de ambiente personalizada
+            self._init_from_env_var(credentials_source)
+    
+    def _init_from_env_var(self, env_var_name: str = 'GOOGLE_CREDENTIALS_JSON'):
+        """Inicializa usando variável de ambiente."""
+        credentials_json = os.getenv(env_var_name)
+        if not credentials_json:
+            raise ValueError(f"Variável de ambiente '{env_var_name}' não encontrada. "
+                           f"Configure com o JSON das credenciais do Google Service Account.")
+        
+        try:
+            credentials_dict = json.loads(credentials_json)
+            self.credentials = Credentials.from_service_account_info(
+                credentials_dict, 
+                scopes=self.SCOPES
+            )
+            self.service = build('sheets', 'v4', credentials=self.credentials)
+        except json.JSONDecodeError:
+            raise ValueError(f"JSON inválido na variável de ambiente '{env_var_name}'")
+        except Exception as e:
+            raise ValueError(f"Erro ao carregar credenciais da variável de ambiente: {str(e)}")
+    
+    def _init_from_json_string(self, json_string: str):
+        """Inicializa usando string JSON direta."""
+        try:
+            credentials_dict = json.loads(json_string)
+            self.credentials = Credentials.from_service_account_info(
+                credentials_dict, 
+                scopes=self.SCOPES
+            )
+            self.service = build('sheets', 'v4', credentials=self.credentials)
+        except json.JSONDecodeError:
+            raise ValueError("JSON de credenciais inválido")
+        except Exception as e:
+            raise ValueError(f"Erro ao carregar credenciais do JSON: {str(e)}")
+    
+    def _init_from_file(self, credentials_path: str):
+        """Inicializa usando arquivo JSON (deprecated)."""
         if not os.path.exists(credentials_path):
             raise FileNotFoundError(f"Arquivo de credenciais não encontrado: {credentials_path}")
         
@@ -52,8 +101,8 @@ class GoogleSheetsAPI:
             )
             self.service = build('sheets', 'v4', credentials=self.credentials)
         except Exception as e:
-            raise ValueError(f"Erro ao carregar credenciais: {str(e)}")
-    
+            raise ValueError(f"Erro ao carregar credenciais do arquivo: {str(e)}")
+
     @classmethod
     def from_credentials_dict(cls, credentials_dict: Dict[str, Any]) -> 'GoogleSheetsAPI':
         """
@@ -86,15 +135,7 @@ class GoogleSheetsAPI:
         Returns:
             GoogleSheetsAPI: Nova instância da classe.
         """
-        credentials_json = os.getenv(env_var_name)
-        if not credentials_json:
-            raise ValueError(f"Variável de ambiente '{env_var_name}' não encontrada")
-        
-        try:
-            credentials_dict = json.loads(credentials_json)
-            return cls.from_credentials_dict(credentials_dict)
-        except json.JSONDecodeError:
-            raise ValueError(f"JSON inválido na variável de ambiente '{env_var_name}'")
+        return cls(credentials_source=None)  # Usa o novo construtor padrão
     
     def get_spreadsheet_info(self, spreadsheet_id: str) -> Dict[str, Any]:
         """

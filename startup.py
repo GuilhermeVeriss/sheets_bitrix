@@ -55,8 +55,7 @@ class StartupModule:
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.StreamHandler(sys.stdout),
-                logging.FileHandler('startup.log', encoding='utf-8')
+                logging.StreamHandler(sys.stdout)
             ]
         )
         self.logger = logging.getLogger(__name__)
@@ -66,7 +65,7 @@ class StartupModule:
         load_dotenv(self.env_file)
         
         # Validar variáveis obrigatórias
-        required_vars = ['DATABASE_URL', 'BITRIX_URL', 'GOOGLE_CREDENTIALS']
+        required_vars = ['DATABASE_URL', 'BITRIX_URL', 'GOOGLE_CREDENTIALS_JSON']
         missing_vars = []
         
         for var in required_vars:
@@ -166,6 +165,36 @@ class StartupModule:
                     details JSONB
                 );
                 
+                -- Criar tabela de log de processamento Bitrix (nova)
+                CREATE TABLE IF NOT EXISTS bitrix_processing_log (
+                    id SERIAL PRIMARY KEY,
+                    data DATE,
+                    cnpj VARCHAR(20),
+                    telefone VARCHAR(20),
+                    nome VARCHAR(255),
+                    empresa VARCHAR(500),
+                    consultor VARCHAR(255),
+                    forma_prospeccao VARCHAR(255),
+                    etapa VARCHAR(255),
+                    banco VARCHAR(255),
+                    status VARCHAR(20) NOT NULL,  -- 'SUCCESS', 'FAILED', 'SKIPPED'
+                    action_type VARCHAR(20),     -- 'created', 'updated', 'skipped'
+                    deal_id INTEGER,             -- ID do deal no Bitrix
+                    contact_id INTEGER,          -- ID do contato no Bitrix
+                    error_message TEXT,          -- Mensagem de erro se houver
+                    processing_details JSONB,    -- Detalhes completos do processamento
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    sync_session_id INTEGER REFERENCES sync_log(id) ON DELETE SET NULL
+                );
+                
+                -- Criar índices para a nova tabela
+                CREATE INDEX IF NOT EXISTS idx_bitrix_log_status ON bitrix_processing_log(status);
+                CREATE INDEX IF NOT EXISTS idx_bitrix_log_empresa ON bitrix_processing_log(empresa);
+                CREATE INDEX IF NOT EXISTS idx_bitrix_log_consultor ON bitrix_processing_log(consultor);
+                CREATE INDEX IF NOT EXISTS idx_bitrix_log_processed_at ON bitrix_processing_log(processed_at);
+                CREATE INDEX IF NOT EXISTS idx_bitrix_log_sync_session ON bitrix_processing_log(sync_session_id);
+                CREATE INDEX IF NOT EXISTS idx_bitrix_log_deal_id ON bitrix_processing_log(deal_id);
+                
                 -- Função para atualizar updated_at automaticamente
                 CREATE OR REPLACE FUNCTION update_updated_at_column()
                 RETURNS TRIGGER AS $$
@@ -212,9 +241,8 @@ class StartupModule:
             bool: True se APIs foram inicializadas com sucesso
         """
         try:
-            # Inicializar Google Sheets API
-            google_credentials = os.getenv('GOOGLE_CREDENTIALS')
-            self.google_sheets = GoogleSheetsAPI(google_credentials)
+            # Inicializar Google Sheets API usando variáveis de ambiente
+            self.google_sheets = GoogleSheetsAPI()  # Agora usa GOOGLE_CREDENTIALS_JSON por padrão
             self.logger.info("✅ Google Sheets API inicializada")
             
             # Inicializar Bitrix24 API
@@ -620,10 +648,14 @@ def main():
             
             # Definir as configurações para sincronização com Google Sheets
             spreadsheet_id = os.getenv('SPREADSHEET_ID')
-            sheet_ids = [0, 829477907, 797561708, 1064048522]  # IDs das abas especificadas
+            
+            # Obter IDs das abas via variável de ambiente
+            sheet_ids_str = os.getenv('SHEET_IDS', '0,829477907,797561708,1064048522')
+            sheet_ids = [int(id.strip()) for id in sheet_ids_str.split(',')]
             
             if spreadsheet_id:
                 print("🔄 Iniciando sincronização com Google Sheets...")
+                print(f"📋 IDs das abas: {sheet_ids}")
                 sync_success = startup.populate_table_from_sheets(spreadsheet_id, sheet_ids)
                 
                 if sync_success:

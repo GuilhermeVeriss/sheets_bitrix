@@ -86,10 +86,6 @@ class MainApp:
         """Configura o sistema de logging para a aplicação."""
         log_level = getattr(logging, self.config.log_level.upper(), logging.INFO)
         
-        # Configurar handler para arquivo
-        file_handler = logging.FileHandler('main_app.log', encoding='utf-8')
-        file_handler.setLevel(log_level)
-        
         # Configurar handler para console
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(log_level)
@@ -98,13 +94,11 @@ class MainApp:
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
         
         # Configurar logger principal
         self.logger = logging.getLogger('MainApp')
         self.logger.setLevel(log_level)
-        self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
         
         # Evitar duplicação de logs
@@ -138,10 +132,14 @@ class MainApp:
                 
             # Executar sincronização inicial com dados das planilhas
             spreadsheet_id = os.getenv('SPREADSHEET_ID')
-            sheet_ids = [0, 829477907, 797561708, 1064048522]  # IDs das abas
+            
+            # Obter IDs das abas via variável de ambiente
+            sheet_ids_str = os.getenv('SHEET_IDS', '0,829477907,797561708,1064048522')
+            sheet_ids = [int(id.strip()) for id in sheet_ids_str.split(',')]
             
             if spreadsheet_id:
                 self.logger.info("📊 Executando carga inicial de dados...")
+                self.logger.info(f"📋 IDs das abas: {sheet_ids}")
                 initial_sync = self.startup_module.populate_table_from_sheets(
                     spreadsheet_id, sheet_ids
                 )
@@ -176,7 +174,10 @@ class MainApp:
             
         try:
             spreadsheet_id = os.getenv('SPREADSHEET_ID')
-            sheet_ids = [0, 829477907, 797561708, 1064048522]
+            
+            # Obter IDs das abas via variável de ambiente
+            sheet_ids_str = os.getenv('SHEET_IDS', '0,829477907,797561708,1064048522')
+            sheet_ids = [int(id.strip()) for id in sheet_ids_str.split(',')]
             
             if not spreadsheet_id:
                 self.logger.error("❌ SPREADSHEET_ID não configurado")

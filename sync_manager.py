@@ -253,6 +253,67 @@ class SyncManager:
             'unchanged': unchanged_records
         }
 
+    def _log_bitrix_processing_record(self, record: Dict, status: str, action_type: str = None, 
+                                       deal_id: int = None, contact_id: int = None, 
+                                       error_message: str = None, processing_details: Dict = None,
+                                       sync_session_id: int = None):
+        """
+        Registra um record processado na tabela bitrix_processing_log.
+        
+        Args:
+            record: Dados do record processado
+            status: Status do processamento ('SUCCESS', 'FAILED', 'SKIPPED')
+            action_type: Tipo de ação ('created', 'updated', 'skipped')
+            deal_id: ID do deal no Bitrix
+            contact_id: ID do contato no Bitrix
+            error_message: Mensagem de erro se houver
+            processing_details: Detalhes completos do processamento
+            sync_session_id: ID da sessão de sincronização
+        """
+        try:
+            from psycopg2.extras import Json
+            
+            with self.startup.connection.cursor() as cursor:
+                # Converter data para o formato adequado
+                data_value = record.get('data')
+                parsed_date = None
+                if data_value:
+                    if isinstance(data_value, str) and data_value.strip():
+                        try:
+                            parsed_date = datetime.strptime(data_value.strip(), '%d/%m/%Y').date()
+                        except ValueError:
+                            try:
+                                parsed_date = datetime.strptime(data_value.strip(), '%Y-%m-%d').date()
+                            except ValueError:
+                                pass
+                
+                cursor.execute("""
+                    INSERT INTO bitrix_processing_log 
+                    (data, cnpj, telefone, nome, empresa, consultor, forma_prospeccao, etapa, banco,
+                     status, action_type, deal_id, contact_id, error_message, processing_details, sync_session_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    parsed_date,
+                    record.get('cnpj'),
+                    record.get('telefone'),
+                    record.get('nome'),
+                    record.get('empresa'),
+                    record.get('consultor'),
+                    record.get('forma_prospeccao'),
+                    record.get('etapa'),
+                    record.get('banco'),
+                    status,
+                    action_type,
+                    deal_id,
+                    contact_id,
+                    error_message,
+                    Json(processing_details) if processing_details else None,
+                    sync_session_id
+                ))
+                
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao salvar log do processamento Bitrix: {str(e)}")
+
     def _process_bitrix_updates(self, new_records: List[Dict], updated_records: List[Dict] = None) -> Dict[str, Any]:
         """
         Processa novos registros e atualizações no Bitrix através da função create_or_update_deal.
@@ -281,6 +342,13 @@ class SyncManager:
                 'error': 'BITRIX_URL não configurada'
             }
         
+        # Inicializar log de sessão de processamento Bitrix
+        bitrix_session_id = self.startup.log_sync_start(
+            "bitrix_processing",
+            f"records_{len(new_records or []) + len(updated_records or [])}",
+            {"new_records": len(new_records or []), "updated_records": len(updated_records or [])}
+        )
+        
         try:
             bitrix_api = BitrixAPI(webhook_url)
             
@@ -293,6 +361,8 @@ class SyncManager:
             
             if not all_records_to_process:
                 self.logger.info("📝 Nenhum registro novo ou atualizado para processar no Bitrix")
+                self.startup.log_sync_end(bitrix_session_id, status='SUCCESS', 
+                                        error_message='Nenhum registro para processar')
                 return {
                     'processed': 0,
                     'successful': 0,
@@ -320,6 +390,12 @@ class SyncManager:
                     if not cnpj and not telefone:
                         self.logger.warning(f"⚠️ Registro {i} pulado: sem CNPJ nem telefone")
                         skipped += 1
+                        # Log do record pulado
+                        self._log_bitrix_processing_record(
+                            record, 'SKIPPED', 'skipped', 
+                            error_message='Sem CNPJ nem telefone',
+                            sync_session_id=bitrix_session_id
+                        )
                         continue
                     
                     # Log do registro sendo processado
@@ -332,7 +408,8 @@ class SyncManager:
                     
                     # Log do resultado
                     action = result.get('action', 'unknown')
-                    deal_id = result.get('deal_id', 'N/A')
+                    deal_id = result.get('deal_id')
+                    contact_id = result.get('contact_id')
                     message = result.get('message', 'Sem mensagem')
                     
                     if action in ['created', 'updated']:
@@ -343,6 +420,15 @@ class SyncManager:
                             'result': result,
                             'action': action
                         })
+                        
+                        # Log do sucesso na tabela
+                        self._log_bitrix_processing_record(
+                            record, 'SUCCESS', action,
+                            deal_id=deal_id,
+                            contact_id=contact_id,
+                            processing_details=result,
+                            sync_session_id=bitrix_session_id
+                        )
                     else:
                         self.logger.warning(f"⚠️ Resultado inesperado: {message}")
                         failed += 1
@@ -350,6 +436,14 @@ class SyncManager:
                             'record': record,
                             'error': f"Resultado inesperado: {message}"
                         })
+                        
+                        # Log do erro na tabela
+                        self._log_bitrix_processing_record(
+                            record, 'FAILED', action,
+                            error_message=f"Resultado inesperado: {message}",
+                            processing_details=result,
+                            sync_session_id=bitrix_session_id
+                        )
                     
                     processed += 1
                     
@@ -363,7 +457,25 @@ class SyncManager:
                         'record': record,
                         'error': error_msg
                     })
+                    
+                    # Log do erro na tabela
+                    self._log_bitrix_processing_record(
+                        record, 'FAILED', None,
+                        error_message=error_msg,
+                        sync_session_id=bitrix_session_id
+                    )
+                    
                     processed += 1
+            
+            # Finalizar log da sessão
+            self.startup.log_sync_end(
+                bitrix_session_id,
+                processed=processed,
+                inserted=successful,
+                updated=0,
+                failed=failed,
+                status='SUCCESS' if failed == 0 else ('PARTIAL' if successful > 0 else 'ERROR')
+            )
             
             # Log do resumo final
             self.logger.info(f"🏁 Processamento Bitrix concluído:")
@@ -400,17 +512,23 @@ class SyncManager:
                 'skipped': skipped,
                 'successful_records': successful_records,
                 'failed_records': failed_records,
+                'session_id': bitrix_session_id,
                 'message': f"{successful} sucessos, {failed} falhas, {skipped} pulados de {len(all_records_to_process)} registros"
             }
             
         except Exception as e:
             error_msg = f"Erro na integração com Bitrix: {str(e)}"
             self.logger.error(f"❌ {error_msg}")
+            
+            # Finalizar log da sessão com erro
+            self.startup.log_sync_end(bitrix_session_id, status='ERROR', error_message=error_msg)
+            
             return {
                 'processed': 0,
                 'successful': 0,
                 'failed': len(all_records_to_process) if all_records_to_process else 0,
                 'skipped': 0,
+                'session_id': bitrix_session_id,
                 'error': error_msg
             }
     
@@ -890,7 +1008,10 @@ def main():
         
         # 3. Configurar parâmetros de sincronização
         spreadsheet_id = os.getenv('SPREADSHEET_ID')
-        sheet_ids = [0, 829477907, 797561708, 1064048522]  # IDs das abas
+        
+        # Obter IDs das abas via variável de ambiente
+        sheet_ids_str = os.getenv('SHEET_IDS', '0,829477907,797561708,1064048522')
+        sheet_ids = [int(id.strip()) for id in sheet_ids_str.split(',')]
         
         if not spreadsheet_id:
             print("❌ SPREADSHEET_ID não configurado no arquivo .env")
@@ -898,6 +1019,7 @@ def main():
         
         # 4. Executar sincronização com detecção de mudanças
         print("🔄 Executando sincronização com detecção de mudanças...")
+        print(f"📋 IDs das abas: {sheet_ids}")
         result = sync_manager.clear_and_resync_database(spreadsheet_id, sheet_ids)
         
         # 5. Exibir resultados

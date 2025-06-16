@@ -38,6 +38,7 @@ class SyncResult:
         new_records (List[Dict]): Registros que são novos
         removed_records (List[Dict]): Registros que foram removidos
         unchanged_records (List[Dict]): Registros que permaneceram iguais
+        bitrix_processing (Dict): Resultado do processamento no Bitrix
     """
     total_processed: int = 0
     total_inserted: int = 0
@@ -49,6 +50,7 @@ class SyncResult:
     new_records: List[Dict] = None
     removed_records: List[Dict] = None
     unchanged_records: List[Dict] = None
+    bitrix_processing: Dict = None
     
     def __post_init__(self):
         if self.sheets_data is None:
@@ -61,6 +63,8 @@ class SyncResult:
             self.removed_records = []
         if self.unchanged_records is None:
             self.unchanged_records = []
+        if self.bitrix_processing is None:
+            self.bitrix_processing = {}
 
 
 class SyncManager:
@@ -249,17 +253,266 @@ class SyncManager:
             'unchanged': unchanged_records
         }
 
+    def _process_bitrix_updates(self, new_records: List[Dict], updated_records: List[Dict] = None) -> Dict[str, Any]:
+        """
+        Processa novos registros e atualizações no Bitrix através da função create_or_update_deal.
+        
+        Args:
+            new_records: Lista de novos registros detectados
+            updated_records: Lista de registros atualizados (opcional)
+            
+        Returns:
+            Dict: Resultado do processamento com estatísticas e logs
+        """
+        from bitrix_api import BitrixAPI
+        import os
+        
+        self.logger.info("🎯 Iniciando processamento de registros no Bitrix...")
+        
+        # Verificar se BitrixAPI está disponível e configurada
+        webhook_url = os.getenv('BITRIX_URL')
+        if not webhook_url:
+            self.logger.warning("⚠️ BITRIX_URL não configurada. Pulando integração com Bitrix.")
+            return {
+                'processed': 0,
+                'successful': 0,
+                'failed': 0,
+                'skipped': 0,
+                'error': 'BITRIX_URL não configurada'
+            }
+        
+        try:
+            bitrix_api = BitrixAPI(webhook_url)
+            
+            # Combinar novos registros e atualizações
+            all_records_to_process = []
+            if new_records:
+                all_records_to_process.extend(new_records)
+            if updated_records:
+                all_records_to_process.extend(updated_records)
+            
+            if not all_records_to_process:
+                self.logger.info("📝 Nenhum registro novo ou atualizado para processar no Bitrix")
+                return {
+                    'processed': 0,
+                    'successful': 0,
+                    'failed': 0,
+                    'skipped': 0,
+                    'message': 'Nenhum registro para processar'
+                }
+            
+            # Processar cada registro
+            processed = 0
+            successful = 0
+            failed = 0
+            skipped = 0
+            failed_records = []
+            successful_records = []
+            
+            self.logger.info(f"📊 Processando {len(all_records_to_process)} registros no Bitrix...")
+            
+            for i, record in enumerate(all_records_to_process[:50], 1):
+                try:
+                    # Validar se o registro tem dados mínimos necessários
+                    cnpj = record.get('cnpj', '').strip() if record.get('cnpj') else ''
+                    telefone = record.get('telefone', '').strip() if record.get('telefone') else ''
+                    
+                    if not cnpj and not telefone:
+                        self.logger.warning(f"⚠️ Registro {i} pulado: sem CNPJ nem telefone")
+                        skipped += 1
+                        continue
+                    
+                    # Log do registro sendo processado
+                    empresa = record.get('empresa', '').strip() if record.get('empresa') else ''
+                    log_info = f"CNPJ: {cnpj or 'N/A'}, Telefone: {telefone or 'N/A'}, Empresa: {empresa or 'N/A'}"
+                    self.logger.info(f"🔄 Processando registro {i}/{len(all_records_to_process)}: {log_info}")
+                    
+                    # Chamar create_or_update_deal do Bitrix
+                    result = bitrix_api.create_or_update_deal(record)
+                    
+                    # Log do resultado
+                    action = result.get('action', 'unknown')
+                    deal_id = result.get('deal_id', 'N/A')
+                    message = result.get('message', 'Sem mensagem')
+                    
+                    if action in ['created', 'updated']:
+                        self.logger.info(f"✅ Deal {action}: ID {deal_id} - {message}")
+                        successful += 1
+                        successful_records.append({
+                            'record': record,
+                            'result': result,
+                            'action': action
+                        })
+                    else:
+                        self.logger.warning(f"⚠️ Resultado inesperado: {message}")
+                        failed += 1
+                        failed_records.append({
+                            'record': record,
+                            'error': f"Resultado inesperado: {message}"
+                        })
+                    
+                    processed += 1
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    self.logger.error(f"❌ Erro ao processar registro {i}: {error_msg}")
+                    self.logger.error(f"   Dados do registro: {json.dumps(record, ensure_ascii=False)}")
+                    
+                    failed += 1
+                    failed_records.append({
+                        'record': record,
+                        'error': error_msg
+                    })
+                    processed += 1
+            
+            # Log do resumo final
+            self.logger.info(f"🏁 Processamento Bitrix concluído:")
+            self.logger.info(f"   📊 Total processado: {processed}")
+            self.logger.info(f"   ✅ Sucessos: {successful}")
+            self.logger.info(f"   ❌ Falhas: {failed}")
+            self.logger.info(f"   ⏭️ Pulados: {skipped}")
+            
+            # Log detalhado dos sucessos
+            if successful_records:
+                self.logger.info("🎉 Deals processados com sucesso:")
+                for success in successful_records[:5]:  # Mostrar até 5 sucessos
+                    deal_id = success['result'].get('deal_id', 'N/A')
+                    action = success['action']
+                    empresa = success['record'].get('empresa', 'N/A')
+                    self.logger.info(f"   - Deal {action}: ID {deal_id} - {empresa}")
+                if len(successful_records) > 5:
+                    self.logger.info(f"   ... e mais {len(successful_records) - 5} deals processados")
+            
+            # Log detalhado das falhas
+            if failed_records:
+                self.logger.warning("💥 Erros encontrados:")
+                for failure in failed_records[:3]:  # Mostrar até 3 erros
+                    empresa = failure['record'].get('empresa', 'N/A')
+                    error = failure['error']
+                    self.logger.warning(f"   - {empresa}: {error}")
+                if len(failed_records) > 3:
+                    self.logger.warning(f"   ... e mais {len(failed_records) - 3} erros")
+            
+            return {
+                'processed': processed,
+                'successful': successful,
+                'failed': failed,
+                'skipped': skipped,
+                'successful_records': successful_records,
+                'failed_records': failed_records,
+                'message': f"{successful} sucessos, {failed} falhas, {skipped} pulados de {len(all_records_to_process)} registros"
+            }
+            
+        except Exception as e:
+            error_msg = f"Erro na integração com Bitrix: {str(e)}"
+            self.logger.error(f"❌ {error_msg}")
+            return {
+                'processed': 0,
+                'successful': 0,
+                'failed': len(all_records_to_process) if all_records_to_process else 0,
+                'skipped': 0,
+                'error': error_msg
+            }
+    
+    def _validate_all_sheets_data_before_sync(self, spreadsheet_id: str, sheet_ids: List[int]) -> Dict[str, Any]:
+        """
+        Valida e busca dados de TODAS as abas especificadas ANTES de fazer qualquer alteração no banco.
+        
+        Esta função é crítica para garantir que nenhuma atualização do banco aconteça se houver
+        qualquer erro ao buscar dados das planilhas.
+        
+        Args:
+            spreadsheet_id (str): ID da planilha do Google Sheets
+            sheet_ids (List[int]): Lista de IDs das abas para validar
+            
+        Returns:
+            Dict[str, Any]: Resultado da validação com dados de todas as abas ou erro
+            
+        Raises:
+            Exception: Se qualquer aba falhar na busca dos dados
+        """
+        validation_result = {
+            'success': False,
+            'sheets_data': {},
+            'total_records': 0,
+            'failed_sheets': [],
+            'error_message': None
+        }
+        
+        try:
+            self.logger.info(f"🔍 VALIDAÇÃO CRÍTICA: Verificando dados de {len(sheet_ids)} abas ANTES de qualquer alteração no banco...")
+            
+            # Tentar buscar dados de TODAS as abas primeiro
+            for sheet_id in sheet_ids:
+                try:
+                    self.logger.info(f"📊 Validando aba ID: {sheet_id}")
+                    
+                    # Tentar obter dados da aba - SE FALHAR AQUI, PARAR TUDO
+                    sheet_data = self.startup.google_sheets.get_sheet_data_as_json(
+                        spreadsheet_id, 
+                        sheet_id
+                    )
+                    
+                    sheet_name = sheet_data['sheet_info']['sheet_name']
+                    rows_data = sheet_data['data']
+                    
+                    # Validar se a aba tem estrutura mínima esperada
+                    if 'sheet_info' not in sheet_data or 'data' not in sheet_data:
+                        raise Exception(f"Estrutura de dados inválida retornada pela aba '{sheet_name}'")
+                    
+                    # Armazenar dados da aba
+                    validation_result['sheets_data'][sheet_id] = {
+                        'sheet_name': sheet_name,
+                        'data': rows_data,
+                        'total_rows': len(rows_data),
+                        'sheet_info': sheet_data['sheet_info']
+                    }
+                    
+                    validation_result['total_records'] += len(rows_data)
+                    
+                    self.logger.info(f"✅ Aba '{sheet_name}' validada: {len(rows_data)} registros")
+                    
+                except Exception as sheet_error:
+                    error_msg = f"Erro ao buscar dados da aba ID {sheet_id}: {str(sheet_error)}"
+                    self.logger.error(f"❌ {error_msg}")
+                    
+                    validation_result['failed_sheets'].append({
+                        'sheet_id': sheet_id,
+                        'error': str(sheet_error)
+                    })
+                    
+                    # SE QUALQUER ABA FALHAR, PARAR IMEDIATAMENTE
+                    validation_result['error_message'] = error_msg
+                    raise Exception(error_msg)
+            
+            # Se chegou aqui, todas as abas foram validadas com sucesso
+            validation_result['success'] = True
+            self.logger.info(f"✅ Todas as {len(sheet_ids)} abas validadas com sucesso!")
+            self.logger.info(f"📊 Total de registros encontrados: {validation_result['total_records']}")
+            
+            return validation_result
+            
+        except Exception as e:
+            validation_result['error_message'] = str(e)
+            self.logger.error(f"❌ Falha na validação das abas: {str(e)}")
+            self.logger.error("🚫 SINCRONIZAÇÃO CANCELADA - dados das planilhas não puderam ser obtidos")
+            raise e
+
     def clear_and_resync_database(self, spreadsheet_id: str, sheet_ids: List[int]) -> SyncResult:
         """
         Método principal para sincronização por limpeza total e reinserção com detecção de mudanças.
         
+        IMPORTANTE: Valida TODAS as abas ANTES de fazer qualquer alteração no banco.
+        Se qualquer aba falhar na busca, a sincronização é cancelada.
+        
         Este método:
-        1. Captura snapshot dos dados atuais
-        2. Remove todos os dados da tabela leads_data
-        3. Carrega dados frescos de todas as abas especificadas
-        4. Insere todos os dados no banco
-        5. Compara antes/depois para detectar mudanças
-        6. Retorna relatório detalhado das diferenças
+        1. PRIMEIRO: Valida todas as abas das planilhas
+        2. Captura snapshot dos dados atuais
+        3. Remove todos os dados da tabela leads_data
+        4. Carrega dados frescos de todas as abas especificadas (dados já validados)
+        5. Insere todos os dados no banco
+        6. Compara antes/depois para detectar mudanças
+        7. Retorna relatório detalhado das diferenças
         
         Args:
             spreadsheet_id (str): ID da planilha do Google Sheets
@@ -269,11 +522,11 @@ class SyncManager:
             SyncResult: Resultado detalhado da sincronização com mudanças detectadas
         """
         start_time = datetime.now()
-        self.logger.info("🔄 Iniciando sincronização com detecção de mudanças...")
+        self.logger.info("🔄 Iniciando sincronização com validação e detecção de mudanças...")
         
         # Registrar início da sincronização
         log_id = self.startup.log_sync_start(
-            "clear_and_resync_with_changes", 
+            "clear_and_resync_validated", 
             f"sheets_{sheet_ids}",
             {"spreadsheet_id": spreadsheet_id, "sheet_ids": sheet_ids}
         )
@@ -281,33 +534,56 @@ class SyncManager:
         result = SyncResult()
         
         try:
-            # 1. Capturar snapshot dos dados atuais ANTES da limpeza
+            # 1. PRIMEIRO: VALIDAR TODAS as abas ANTES de fazer qualquer alteração no banco
+            self.logger.info("🔒 VALIDAÇÃO CRÍTICA: Verificando dados de todas as abas antes de qualquer alteração no banco...")
+            
+            try:
+                validation_result = self._validate_all_sheets_data_before_sync(spreadsheet_id, sheet_ids)
+            except Exception as validation_error:
+                self.logger.error(f"❌ VALIDAÇÃO FALHOU: {str(validation_error)}")
+                self.logger.error("🚫 Sincronização CANCELADA por falha na validação das planilhas")
+                
+                result.error_message = f"Validação falhou: {str(validation_error)}"
+                result.sync_duration = (datetime.now() - start_time).total_seconds()
+                
+                self.startup.log_sync_end(log_id, status='ERROR', error_message=result.error_message)
+                return result
+            
+            if not validation_result['success']:
+                self.logger.error("❌ VALIDAÇÃO FALHOU: Nem todas as abas puderam ser carregadas")
+                self.logger.error("🚫 Sincronização CANCELADA")
+                
+                result.error_message = validation_result['error_message']
+                result.sync_duration = (datetime.now() - start_time).total_seconds()
+                
+                self.startup.log_sync_end(log_id, status='ERROR', error_message=result.error_message)
+                return result
+            
+            self.logger.info("✅ VALIDAÇÃO APROVADA: Todas as abas carregadas com sucesso")
+            self.logger.info(f"📊 Total de {validation_result['total_records']} registros validados")
+            
+            # 2. Capturar snapshot dos dados atuais ANTES da limpeza
             self.logger.info("📸 Capturando snapshot dos dados atuais...")
             old_snapshot = self._capture_current_snapshot()
             
-            # 2. Limpar todos os dados da tabela
-            self.logger.info("🗑️ Limpando tabela leads_data...")
+            # 3. AGORA é seguro limpar o banco (dados já validados)
+            self.logger.info("🗑️ Limpando tabela leads_data (dados validados, operação segura)...")
             with self.startup.connection.cursor() as cursor:
                 cursor.execute("DELETE FROM leads_data;")
                 self.logger.info("✅ Tabela leads_data limpa com sucesso")
             
-            # 3. Processar cada aba e coletar dados
+            # 4. Processar cada aba usando os dados já validados
             all_insert_values = []
             sheet_names = []
             
             for sheet_id in sheet_ids:
                 try:
-                    self.logger.info(f"📊 Processando aba ID: {sheet_id}")
+                    # Usar dados já validados ao invés de buscar novamente
+                    validated_sheet = validation_result['sheets_data'][sheet_id]
+                    sheet_name = validated_sheet['sheet_name']
+                    rows_data = validated_sheet['data']
                     
-                    # Obter dados da aba
-                    sheet_data = self.startup.google_sheets.get_sheet_data_as_json(
-                        spreadsheet_id, sheet_id
-                    )
-                    
-                    sheet_name = sheet_data['sheet_info']['sheet_name']
-                    rows_data = sheet_data['data']
-                    
-                    self.logger.info(f"📋 Aba '{sheet_name}': {len(rows_data)} registros encontrados")
+                    self.logger.info(f"📊 Processando aba '{sheet_name}': {len(rows_data)} registros")
                     
                     # Processar cada linha da aba
                     processed_count = 0
@@ -373,14 +649,15 @@ class SyncManager:
                     self.logger.info(f"✅ Aba '{sheet_name}': {processed_count} processados, {failed_count} falharam")
                     
                 except Exception as sheet_error:
-                    self.logger.error(f"❌ Erro ao processar aba ID {sheet_id}: {str(sheet_error)}")
+                    # Como os dados já foram validados, isso só aconteceria em caso de erro de processamento interno
+                    self.logger.error(f"❌ Erro interno ao processar aba ID {sheet_id}: {str(sheet_error)}")
                     result.failed_records += 1
             
-            # 4. Criar snapshot dos novos dados
+            # 5. Criar snapshot dos novos dados
             self.logger.info("📸 Criando snapshot dos novos dados...")
             new_snapshot = self._create_new_data_snapshot(all_insert_values, sheet_names)
             
-            # 5. Inserir todos os dados coletados no banco
+            # 6. Inserir todos os dados coletados no banco
             if all_insert_values:
                 self.logger.info(f"💾 Inserindo {len(all_insert_values)} registros no banco...")
                 
@@ -399,7 +676,7 @@ class SyncManager:
             else:
                 self.logger.warning("⚠️ Nenhum registro válido encontrado para inserir")
             
-            # 6. Comparar snapshots para detectar mudanças
+            # 7. Comparar snapshots para detectar mudanças
             self.logger.info("🔍 Detectando mudanças...")
             changes = self._compare_snapshots(old_snapshot, new_snapshot)
             
@@ -416,11 +693,11 @@ class SyncManager:
                 'summary': f"{len(result.new_records)} novos, {len(result.removed_records)} removidos, {len(result.unchanged_records)} inalterados"
             }
             
-            # 7. Calcular estatísticas finais
+            # 8. Calcular estatísticas finais
             end_time = datetime.now()
             result.sync_duration = (end_time - start_time).total_seconds()
             
-            # 8. Registrar fim da sincronização
+            # 9. Registrar fim da sincronização
             self.startup.log_sync_end(
                 log_id,
                 processed=result.total_processed,
@@ -430,15 +707,33 @@ class SyncManager:
                 status='SUCCESS' if not result.error_message else 'PARTIAL'
             )
             
-            self.logger.info(f"🎉 Sincronização concluída em {result.sync_duration:.2f}s")
+            self.logger.info(f"🎉 Sincronização concluída com validação em {result.sync_duration:.2f}s")
             self.logger.info(f"📊 Resumo: {result.total_processed} processados, {result.total_inserted} inseridos, {result.failed_records} falharam")
             self.logger.info(f"🔍 Mudanças: {result.changes_detected['summary']}")
             
-            # Log detalhado dos novos registros inseridos
+            # 10. Processar atualizações no Bitrix
             if result.new_records:
-                self.logger.info("📝 Detalhes dos novos registros inseridos:")
-                for record in result.new_records:
-                    self.logger.info(f"   - {json.dumps(record, ensure_ascii=False)}")
+                self.logger.info("🎯 Processando novos registros no Bitrix...")
+                
+                bitrix_result = self._process_bitrix_updates(result.new_records)
+                
+                # Adicionar resultado do Bitrix ao resultado da sincronização
+                result.bitrix_processing = bitrix_result
+                
+                # Log resumido do processamento no Bitrix
+                if bitrix_result.get('error'):
+                    self.logger.warning(f"⚠️ Erro no processamento Bitrix: {bitrix_result['error']}")
+                else:
+                    self.logger.info(f"🎉 Processamento Bitrix concluído: {bitrix_result.get('message', 'Sem detalhes')}")
+            else:
+                self.logger.info("📝 Nenhum registro novo para processar no Bitrix")
+                result.bitrix_processing = {
+                    'processed': 0,
+                    'successful': 0,
+                    'failed': 0,
+                    'skipped': 0,
+                    'message': 'Nenhum registro novo para processar'
+                }
             
             return result
             
@@ -634,6 +929,30 @@ def main():
             if len(result.removed_records) > 3:
                 print(f"   ... e mais {len(result.removed_records) - 3} registros removidos")
         
+        # 9. Exibir resultado do processamento no Bitrix
+        if hasattr(result, 'bitrix_processing') and result.bitrix_processing:
+            print(f"\n🎯 Processamento no Bitrix:")
+            bitrix = result.bitrix_processing
+            if bitrix.get('error'):
+                print(f"   ❌ Erro: {bitrix['error']}")
+            else:
+                print(f"   📊 Total processado: {bitrix.get('processed', 0)}")
+                print(f"   ✅ Sucessos: {bitrix.get('successful', 0)}")
+                print(f"   ❌ Falhas: {bitrix.get('failed', 0)}")
+                print(f"   ⏭️ Pulados: {bitrix.get('skipped', 0)}")
+                print(f"   💬 Resumo: {bitrix.get('message', 'Sem detalhes')}")
+                
+                # Mostrar alguns deals criados/atualizados
+                if bitrix.get('successful_records'):
+                    print(f"\n🎉 Exemplos de deals processados no Bitrix:")
+                    for i, success in enumerate(bitrix['successful_records'][:3]):
+                        deal_id = success['result'].get('deal_id', 'N/A')
+                        action = success['action']
+                        empresa = success['record'].get('empresa', 'N/A')
+                        print(f"   {i+1}. Deal {action}: ID {deal_id} - {empresa}")
+                    if len(bitrix['successful_records']) > 3:
+                        print(f"   ... e mais {len(bitrix['successful_records']) - 3} deals processados")
+        
         # Detalhes por aba
         if result.sheets_data:
             print(f"\n📋 Detalhes por aba:")
@@ -657,5 +976,5 @@ def main():
         startup.close()
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

@@ -706,12 +706,12 @@ class BitrixAPI:
 
     # ===== MÉTODOS PARA ADMINISTRAÇÃO DE CONTATOS =====
     
-    def find_contacts_by_criteria(self, name: str = None, phone: str = None, cnpj: str = None) -> List[Dict]:
+    def find_contacts_by_criteria(self, phone: str = None, cnpj: str = None) -> List[Dict]:
         """
-        Busca contatos existentes pelos critérios especificados (NAME, PHONE ou CNPJ).
+        Busca contatos existentes pelos critérios especificados (PHONE ou CNPJ apenas).
+        Removido o parâmetro 'name' para tornar a busca mais assertiva.
         
         Args:
-            name (str, optional): Nome da empresa para busca.
             phone (str, optional): Telefone para busca.
             cnpj (str, optional): CNPJ para busca (campo UF_CRM_1734528621).
         
@@ -721,15 +721,6 @@ class BitrixAPI:
         contacts = []
         
         try:
-            # Busca por nome (empresa)
-            if name:
-                result = self.list_contacts(
-                    filter_params={"NAME": name},
-                    select=["ID", "NAME", "PHONE", "UF_CRM_1734528621", "ASSIGNED_BY_ID"]
-                )
-                if result.get("result"):
-                    contacts.extend(result["result"])
-            
             # Busca por telefone
             if phone:
                 result = self.list_contacts(
@@ -737,11 +728,7 @@ class BitrixAPI:
                     select=["ID", "NAME", "PHONE", "UF_CRM_1734528621", "ASSIGNED_BY_ID"]
                 )
                 if result.get("result"):
-                    # Evita duplicatas
-                    existing_ids = {contact["ID"] for contact in contacts}
-                    for contact in result["result"]:
-                        if contact["ID"] not in existing_ids:
-                            contacts.append(contact)
+                    contacts.extend(result["result"])
             
             # Busca por CNPJ
             if cnpj:
@@ -796,13 +783,12 @@ class BitrixAPI:
             cnpj = self._safe_strip(contact_data.get("cnpj"))
             consultor = self._safe_strip(contact_data.get("consultor"))
             
-            # Validação: pelo menos um campo deve estar preenchido
-            if not empresa and not telefone and not cnpj:
-                raise Exception("É necessário fornecer pelo menos um dos campos: empresa, telefone ou CNPJ")
+            # Validação: pelo menos um campo de busca deve estar preenchido
+            if not telefone and not cnpj:
+                raise Exception("É necessário fornecer pelo menos um dos campos: telefone ou CNPJ")
             
             # Busca por contatos existentes
             existing_contacts = self.find_contacts_by_criteria(
-                name=empresa if empresa else None,
                 phone=telefone if telefone else None,
                 cnpj=cnpj if cnpj else None
             )
@@ -849,20 +835,34 @@ class BitrixAPI:
             if existing_contacts:
                 contact_id = int(existing_contacts[0]["ID"])
                 
-                # Atualiza apenas campos que não estão vazios
+                # Para telefones, precisamos mesclar com os existentes em vez de sobrescrever
                 update_fields = {}
+                
+                # Processa telefone especialmente para não sobrescrever
+                if telefone:
+                    # Obtém os telefones existentes do contato
+                    existing_phones = existing_contacts[0].get("PHONE", [])
+                    if not isinstance(existing_phones, list):
+                        existing_phones = []
+                    
+                    # Mescla o novo telefone com os existentes
+                    merged_phones = self._merge_phone_numbers(existing_phones, telefone)
+                    update_fields["PHONE"] = merged_phones
+                
+                # Adiciona outros campos que não estão vazios
                 for key, value in contact_fields.items():
-                    if value:  # Só atualiza se o valor não estiver vazio
+                    if value and key != "PHONE":  # PHONE já foi processado especialmente
                         update_fields[key] = value
                 
                 if update_fields:  # Só atualiza se há campos para atualizar
                     self.update_contact(contact_id, update_fields)
                 
                 contact_name = existing_contacts[0].get("NAME", "Contato sem nome")
+                phone_info = f" (telefone adicionado: {telefone})" if telefone and telefone not in str(existing_contacts[0].get("PHONE", [])) else ""
                 return {
                     "action": "updated",
                     "contact_id": contact_id,
-                    "message": f"Contato atualizado: {contact_name}",
+                    "message": f"Contato atualizado: {contact_name}{phone_info}",
                     "contact_data": existing_contacts[0],
                     "duplicates_found": len(existing_contacts)
                 }
@@ -970,13 +970,13 @@ class BitrixAPI:
     
     # ===== MÉTODOS PARA ADMINISTRAÇÃO DE DEALS (NEGÓCIOS) =====
     
-    def find_deals_by_criteria(self, title: str = None, cnpj: str = None) -> List[Dict]:
+    def find_deals_by_criteria(self, cnpj: str = None) -> List[Dict]:
         """
-        Busca deals existentes pelos critérios especificados (TITLE ou CNPJ apenas).
+        Busca deals existentes pelos critérios especificados (CNPJ apenas).
+        Removido o parâmetro 'title' para tornar a busca mais assertiva.
         NÃO busca por CONTACT_ID para permitir múltiplos deals por contato.
         
         Args:
-            title (str, optional): Título do deal (empresa).
             cnpj (str, optional): CNPJ para busca (campo UF_CRM_1741653424).
         
         Returns:
@@ -985,16 +985,6 @@ class BitrixAPI:
         deals = []
         
         try:
-            # Busca por título (empresa)
-            if title:
-                result = self.list_deals(
-                    filter_params={"TITLE": title},
-                    select=["ID", "TITLE", "UF_CRM_1741653424", "CONTACT_ID", "CATEGORY_ID", 
-                           "UF_CRM_1748264680989", "ASSIGNED_BY_ID", "STAGE_ID"]
-                )
-                if result.get("result"):
-                    deals.extend(result["result"])
-            
             # Busca por CNPJ
             if cnpj:
                 result = self.list_deals(
@@ -1003,11 +993,7 @@ class BitrixAPI:
                            "UF_CRM_1748264680989", "ASSIGNED_BY_ID", "STAGE_ID"]
                 )
                 if result.get("result"):
-                    # Evita duplicatas
-                    existing_ids = {deal["ID"] for deal in deals}
-                    for deal in result["result"]:
-                        if deal["ID"] not in existing_ids:
-                            deals.append(deal)
+                    deals.extend(result["result"])
             
             return deals
             
@@ -1052,17 +1038,16 @@ class BitrixAPI:
             forma_prospeccao = self._safe_strip(deal_data.get("forma_prospeccao"))
             etapa = self._safe_strip(deal_data.get("etapa"))
             
-            # Validação: pelo menos um campo deve estar preenchido
-            if not empresa and not cnpj:
-                raise Exception("É necessário fornecer pelo menos um dos campos: empresa ou CNPJ")
+            # Validação: CNPJ é obrigatório para deals
+            if not cnpj:
+                raise Exception("É necessário fornecer o CNPJ para criar/atualizar um deal")
             
             # 1. Primeiro, verifica/cria o contato associado
             contact_result = self.create_or_update_contact(deal_data)
             contact_id = contact_result["contact_id"]
             
-            # 2. Busca por deals existentes APENAS por TITLE ou CNPJ (não por contact_id)
+            # 2. Busca por deals existentes APENAS por CNPJ (não por contact_id)
             existing_deals = self.find_deals_by_criteria(
-                title=empresa if empresa else None,
                 cnpj=cnpj if cnpj else None
             )
             
@@ -1266,3 +1251,33 @@ class BitrixAPI:
             
         except Exception as e:
             raise Exception(f"Erro ao obter resumo do deal {deal_id}: {str(e)}")
+    
+    def _merge_phone_numbers(self, existing_phones: List[Dict], new_phone: str) -> List[Dict]:
+        """
+        Método auxiliar para mesclar números de telefone, evitando duplicatas.
+        
+        Args:
+            existing_phones (List[Dict]): Lista de telefones existentes no formato Bitrix24.
+            new_phone (str): Novo número de telefone a ser adicionado.
+        
+        Returns:
+            List[Dict]: Lista combinada de telefones sem duplicatas.
+        """
+        if not new_phone:
+            return existing_phones
+        
+        # Normaliza o novo telefone removendo espaços e caracteres especiais para comparação
+        new_phone_normalized = ''.join(filter(str.isdigit, new_phone))
+        
+        # Verifica se o telefone já existe
+        for phone in existing_phones:
+            existing_phone_normalized = ''.join(filter(str.isdigit, phone.get("VALUE", "")))
+            if existing_phone_normalized == new_phone_normalized:
+                # Telefone já existe, não adiciona
+                return existing_phones
+        
+        # Telefone não existe, adiciona à lista
+        combined_phones = existing_phones.copy()
+        combined_phones.append({"VALUE": new_phone, "VALUE_TYPE": "WORK"})
+        
+        return combined_phones

@@ -371,10 +371,97 @@ class StartupModule:
             self.connection.close()
             self.logger.info("🔌 Conexão com banco de dados fechada")
             
+    def _validate_all_sheets_data(self, spreadsheet_id: str, sheet_ids: List[int]) -> Dict[str, Any]:
+        """
+        Valida e busca dados de TODAS as abas especificadas ANTES de fazer qualquer alteração no banco.
+        
+        Esta função é crítica para garantir que nenhuma atualização do banco aconteça se houver
+        qualquer erro ao buscar dados das planilhas.
+        
+        Args:
+            spreadsheet_id (str): ID da planilha do Google Sheets
+            sheet_ids (List[int]): Lista de IDs das abas para validar
+            
+        Returns:
+            Dict[str, Any]: Resultado da validação com dados de todas as abas ou erro
+            
+        Raises:
+            Exception: Se qualquer aba falhar na busca dos dados
+        """
+        validation_result = {
+            'success': False,
+            'sheets_data': {},
+            'total_records': 0,
+            'failed_sheets': [],
+            'error_message': None
+        }
+        
+        try:
+            self.logger.info(f"🔍 Validando dados de {len(sheet_ids)} abas ANTES de atualizar banco...")
+            
+            # Tentar buscar dados de TODAS as abas primeiro
+            for sheet_id in sheet_ids:
+                try:
+                    self.logger.info(f"📊 Validando aba ID: {sheet_id}")
+                    
+                    # Tentar obter dados da aba - SE FALHAR AQUI, PARAR TUDO
+                    sheet_data = self.google_sheets.get_sheet_data_as_json(
+                        spreadsheet_id, 
+                        sheet_id
+                    )
+                    
+                    sheet_name = sheet_data['sheet_info']['sheet_name']
+                    rows_data = sheet_data['data']
+                    
+                    # Validar se a aba tem estrutura mínima esperada
+                    if 'sheet_info' not in sheet_data or 'data' not in sheet_data:
+                        raise Exception(f"Estrutura de dados inválida retornada pela aba '{sheet_name}'")
+                    
+                    # Armazenar dados da aba
+                    validation_result['sheets_data'][sheet_id] = {
+                        'sheet_name': sheet_name,
+                        'data': rows_data,
+                        'total_rows': len(rows_data),
+                        'sheet_info': sheet_data['sheet_info']
+                    }
+                    
+                    validation_result['total_records'] += len(rows_data)
+                    
+                    self.logger.info(f"✅ Aba '{sheet_name}' validada: {len(rows_data)} registros")
+                    
+                except Exception as sheet_error:
+                    error_msg = f"Erro ao buscar dados da aba ID {sheet_id}: {str(sheet_error)}"
+                    self.logger.error(f"❌ {error_msg}")
+                    
+                    validation_result['failed_sheets'].append({
+                        'sheet_id': sheet_id,
+                        'error': str(sheet_error)
+                    })
+                    
+                    # SE QUALQUER ABA FALHAR, PARAR IMEDIATAMENTE
+                    validation_result['error_message'] = error_msg
+                    raise Exception(error_msg)
+            
+            # Se chegou aqui, todas as abas foram validadas com sucesso
+            validation_result['success'] = True
+            self.logger.info(f"✅ Todas as {len(sheet_ids)} abas validadas com sucesso!")
+            self.logger.info(f"📊 Total de registros encontrados: {validation_result['total_records']}")
+            
+            return validation_result
+            
+        except Exception as e:
+            validation_result['error_message'] = str(e)
+            self.logger.error(f"❌ Falha na validação das abas: {str(e)}")
+            self.logger.error("🚫 ATUALIZAÇÃO DO BANCO CANCELADA - dados das planilhas não puderam ser obtidos")
+            raise e
+    
     def populate_table_from_sheets(self, spreadsheet_id: str, sheet_ids: List[int]) -> bool:
         """
         Popula a tabela leads_data com dados do Google Sheets.
         Remove todos os dados existentes e popula com dados das abas especificadas.
+        
+        IMPORTANTE: Valida TODAS as abas ANTES de fazer qualquer alteração no banco.
+        Se qualquer aba falhar na busca, a atualização do banco é cancelada.
         
         Args:
             spreadsheet_id (str): ID da planilha do Google Sheets
@@ -387,40 +474,52 @@ class StartupModule:
             self.logger.error("❌ Conexão com banco ou Google Sheets não estabelecida")
             return False
             
-        log_id = self.log_sync_start("sheets_to_db", f"sheets_{sheet_ids}")
+        log_id = self.log_sync_start("sheets_to_db_validated", f"sheets_{sheet_ids}")
         
         try:
-            # 1. Limpar todos os dados da tabela
+            # 1. PRIMEIRO: Validar TODAS as abas antes de fazer qualquer alteração no banco
+            self.logger.info("🔒 VALIDAÇÃO CRÍTICA: Verificando dados de todas as abas antes de atualizar banco...")
+            
+            try:
+                validation_result = self._validate_all_sheets_data(spreadsheet_id, sheet_ids)
+            except Exception as validation_error:
+                self.logger.error(f"❌ VALIDAÇÃO FALHOU: {str(validation_error)}")
+                self.logger.error("🚫 Atualização do banco CANCELADA por falha na validação das planilhas")
+                self.log_sync_end(log_id, status='ERROR', error_message=f"Validação falhou: {str(validation_error)}")
+                return False
+            
+            if not validation_result['success']:
+                self.logger.error("❌ VALIDAÇÃO FALHOU: Nem todas as abas puderam ser carregadas")
+                self.logger.error("🚫 Atualização do banco CANCELADA")
+                self.log_sync_end(log_id, status='ERROR', error_message=validation_result['error_message'])
+                return False
+            
+            self.logger.info("✅ VALIDAÇÃO APROVADA: Todas as abas carregadas com sucesso")
+            self.logger.info(f"📊 Total de {validation_result['total_records']} registros validados")
+            
+            # 2. AGORA é seguro limpar e atualizar o banco (dados já validados)
+            self.logger.info("🗑️ Limpando tabela leads_data (dados validados, operação segura)...")
             with self.connection.cursor() as cursor:
                 cursor.execute("DELETE FROM leads_data;")
-                self.logger.info("🗑️ Dados existentes removidos da tabela leads_data")
+                self.logger.info("✅ Dados existentes removidos da tabela leads_data")
             
             total_processed = 0
             total_inserted = 0
             total_failed = 0
             
-            # 2. Processar cada aba especificada
+            # 3. Processar cada aba usando os dados já validados
             for sheet_id in sheet_ids:
                 try:
-                    self.logger.info(f"📊 Processando aba ID: {sheet_id}")
+                    # Usar dados já validados ao invés de buscar novamente
+                    validated_sheet = validation_result['sheets_data'][sheet_id]
+                    sheet_name = validated_sheet['sheet_name']
+                    rows_data = validated_sheet['data']
                     
-                    # Obter dados da aba
-                    sheet_data = self.google_sheets.get_sheet_data_as_json(
-                        spreadsheet_id, 
-                        sheet_id
-                    )
-                    
-                    sheet_name = sheet_data['sheet_info']['sheet_name']
-                    rows_data = sheet_data['data']
-                    
-                    self.logger.info(f"📋 Aba '{sheet_name}': {len(rows_data)} registros encontrados")
-                    
-                    # 3. Inserir dados na tabela
-                    inserted_count = 0
-                    failed_count = 0
+                    self.logger.info(f"📊 Processando aba '{sheet_name}': {len(rows_data)} registros")
                     
                     # Preparar lista para inserção em massa
                     insert_values = []
+                    failed_count = 0
                     
                     for row in rows_data:
                         try:
@@ -467,6 +566,7 @@ class StartupModule:
                             self.logger.warning(f"⚠️ Erro ao preparar registro: {str(row_error)}")
                             
                     # 4. Inserir dados em massa na tabela (permitindo duplicatas)
+                    inserted_count = 0
                     if insert_values:
                         with self.connection.cursor() as cursor:
                             insert_sql = """
@@ -498,7 +598,7 @@ class StartupModule:
                 status='SUCCESS' if total_failed == 0 else 'PARTIAL'
             )
             
-            self.logger.info(f"🎉 Sincronização concluída!")
+            self.logger.info(f"🎉 Sincronização concluída com validação!")
             self.logger.info(f"📊 Total: {total_processed} processados, {total_inserted} inseridos, {total_failed} falharam")
             
             return True
@@ -567,5 +667,5 @@ def main():
         startup.close()
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

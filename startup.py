@@ -130,8 +130,8 @@ class StartupModule:
                 CREATE TABLE leads_data (
                     id SERIAL PRIMARY KEY,
                     data DATE,
-                    cnpj VARCHAR(20),
-                    telefone VARCHAR(20),
+                    cnpj VARCHAR(30),          -- Aumentado de 20 para 30 para suportar formatação
+                    telefone VARCHAR(30),      -- Aumentado de 20 para 30 para suportar formatação
                     nome VARCHAR(255),
                     empresa VARCHAR(500),
                     consultor VARCHAR(255),
@@ -160,7 +160,7 @@ class StartupModule:
                     records_failed INTEGER DEFAULT 0,
                     started_at TIMESTAMP NOT NULL,
                     finished_at TIMESTAMP,
-                    status VARCHAR(20) DEFAULT 'RUNNING',
+                    status VARCHAR(100) DEFAULT 'RUNNING',    -- Aumentado de 30 para 100
                     error_message TEXT,
                     details JSONB
                 );
@@ -169,16 +169,16 @@ class StartupModule:
                 CREATE TABLE IF NOT EXISTS bitrix_processing_log (
                     id SERIAL PRIMARY KEY,
                     data DATE,
-                    cnpj VARCHAR(20),
-                    telefone VARCHAR(20),
+                    cnpj VARCHAR(30),          -- Aumentado de 20 para 30
+                    telefone VARCHAR(30),      -- Aumentado de 20 para 30
                     nome VARCHAR(255),
                     empresa VARCHAR(500),
                     consultor VARCHAR(255),
                     forma_prospeccao VARCHAR(255),
                     etapa VARCHAR(255),
                     banco VARCHAR(255),
-                    status VARCHAR(20) NOT NULL,  -- 'SUCCESS', 'FAILED', 'SKIPPED'
-                    action_type VARCHAR(20),     -- 'created', 'updated', 'skipped'
+                    status VARCHAR(100) NOT NULL,      -- Aumentado de 30 para 100: 'SUCCESS', 'FAILED', 'SKIPPED', mensagens detalhadas
+                    action_type VARCHAR(100),          -- Aumentado de 30 para 100: 'created', 'updated', 'skipped', descrições detalhadas
                     deal_id INTEGER,             -- ID do deal no Bitrix
                     contact_id INTEGER,          -- ID do contato no Bitrix
                     error_message TEXT,          -- Mensagem de erro se houver
@@ -186,14 +186,6 @@ class StartupModule:
                     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     sync_session_id INTEGER REFERENCES sync_log(id) ON DELETE SET NULL
                 );
-                
-                -- Criar índices para a nova tabela
-                CREATE INDEX IF NOT EXISTS idx_bitrix_log_status ON bitrix_processing_log(status);
-                CREATE INDEX IF NOT EXISTS idx_bitrix_log_empresa ON bitrix_processing_log(empresa);
-                CREATE INDEX IF NOT EXISTS idx_bitrix_log_consultor ON bitrix_processing_log(consultor);
-                CREATE INDEX IF NOT EXISTS idx_bitrix_log_processed_at ON bitrix_processing_log(processed_at);
-                CREATE INDEX IF NOT EXISTS idx_bitrix_log_sync_session ON bitrix_processing_log(sync_session_id);
-                CREATE INDEX IF NOT EXISTS idx_bitrix_log_deal_id ON bitrix_processing_log(deal_id);
                 
                 -- Função para atualizar updated_at automaticamente
                 CREATE OR REPLACE FUNCTION update_updated_at_column()

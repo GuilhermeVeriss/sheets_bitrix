@@ -1037,6 +1037,7 @@ class BitrixAPI:
             consultor = self._safe_strip(deal_data.get("consultor"))
             forma_prospeccao = self._safe_strip(deal_data.get("forma_prospeccao"))
             etapa = self._safe_strip(deal_data.get("etapa"))
+            banco = self._safe_strip(deal_data.get("banco"))
             
             # Validação: CNPJ é obrigatório para deals
             if not cnpj:
@@ -1069,7 +1070,26 @@ class BitrixAPI:
                 else:
                     print(f"Aviso: Etapa '{etapa}' não encontrada no funil DEAL_STAGE_4")
             
-            # 5. Prepara os campos do deal
+            # 5. Processa o campo banco se fornecido
+            banco_id = None
+            if banco:
+                # Dicionário de mapeamento dos bancos
+                bancos_map = {
+                    'C6': '116',
+                    'BS2': '118', 
+                    'SANTANDER': '120'
+                }
+                
+                # Extrai o nome do banco (parte antes do " - ")
+                banco_nome = banco.split(' - ')[0].strip().upper()
+                
+                # Busca o ID correspondente
+                if banco_nome in bancos_map:
+                    banco_id = bancos_map[banco_nome]
+                else:
+                    print(f"Aviso: Banco '{banco_nome}' não encontrado no mapeamento. Bancos disponíveis: {list(bancos_map.keys())}")
+            
+            # 6. Prepara os campos do deal
             deal_fields = {
                 "CATEGORY_ID": 4,  # Sempre 4 (Vendas)
                 "CONTACT_ID": contact_id,  # ID do contato associado
@@ -1090,6 +1110,10 @@ class BitrixAPI:
             if forma_prospeccao:
                 deal_fields["UF_CRM_1748264680989"] = forma_prospeccao
             
+            # Adiciona banco se encontrado
+            if banco_id:
+                deal_fields["UF_CRM_1743684072273"] = banco_id
+            
             # Adiciona consultor se encontrado
             if assigned_by_id:
                 deal_fields["ASSIGNED_BY_ID"] = assigned_by_id
@@ -1098,7 +1122,7 @@ class BitrixAPI:
             if stage_id:
                 deal_fields["STAGE_ID"] = stage_id
             
-            # 6. Se encontrou deals existentes, atualiza o primeiro
+            # 7. Se encontrou deals existentes, atualiza o primeiro
             if existing_deals:
                 deal_id = int(existing_deals[0]["ID"])
                 
@@ -1122,7 +1146,7 @@ class BitrixAPI:
                     "duplicates_found": len(existing_deals)
                 }
             
-            # 7. Se não encontrou deals existentes, cria um novo
+            # 8. Se não encontrou deals existentes, cria um novo
             else:
                 # Verifica se há campos suficientes para criar o deal
                 if not deal_fields.get("TITLE"):
